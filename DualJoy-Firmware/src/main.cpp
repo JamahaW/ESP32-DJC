@@ -10,16 +10,122 @@
 
 static constexpr espnow::Mac target = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
 
-struct [[gnu::packed]] Packet {
-    float x, y, a;
-} packet;
-
-enum class State {
-    Setup,
-    Running
+struct Window {
+    virtual void render(kf::Painter &p) const noexcept = 0;
 };
 
-State current_state = State::Setup;
+struct GUI {
+
+private:
+
+    Window *current_window{nullptr};
+
+public:
+
+    static GUI &instance() noexcept {
+        static GUI instance;
+
+        return instance;
+    }
+
+    void bindWindow(Window &window) noexcept {
+        current_window = &window;
+    }
+
+    void render(kf::Painter &painter) noexcept {
+        if (current_window == nullptr) { return; }
+
+        painter.fill(false);
+
+        current_window->render(painter);
+    }
+
+private:
+
+    GUI() = default;
+
+public:
+
+    GUI(const GUI &) = delete;
+
+};
+
+struct InitWindow : Window {
+
+    static InitWindow &instance() noexcept {
+        static InitWindow instance;
+        return instance;
+    }
+
+    void render(kf::Painter &p) const noexcept override {
+        p.text(0, 0, "Init");
+    }
+
+private:
+
+    InitWindow() = default;
+};
+
+struct JoyWidget final {
+
+    const float *x{nullptr};
+    const float *y{nullptr};
+
+    void render(kf::Painter &p) const noexcept {
+        const auto r = static_cast<kf::Position>(std::min(p.frame.width - 1, p.frame.height - 1) / 2);
+        p.circle(r, r, r, kf::Painter::Mode::FillBorder);
+
+        if (x == nullptr or y == nullptr) { return; }
+
+        const auto line_x = static_cast<kf::Position>(static_cast<float>(r) + *x * static_cast<float>(r));
+        const auto line_y = static_cast<kf::Position>(static_cast<float>(r) - *y * static_cast<float>(r));
+
+        p.line(r, r, line_x, line_y);
+    }
+};
+
+struct AxisWidget final {
+
+    static constexpr kf::Position width = 8;
+
+    const float *value{nullptr};
+
+    void render(kf::Painter &p) const noexcept {
+        const auto x_end = static_cast<kf::Position>(p.frame.width - 1);
+        const auto y_end = static_cast<kf::Position>(p.frame.height - 1);
+        const auto x_start = static_cast<kf::Position>(x_end - width);
+
+        if (value == nullptr) {
+            p.rect(x_start, 0, x_end, y_end, kf::Painter::Mode::FillBorder);
+            return;
+        }
+
+        const auto y_center = static_cast<kf::Position>(y_end / 2);
+        const auto height = static_cast<kf::Position>(static_cast<float>(y_center) - *value * static_cast<float>(y_center));
+
+        p.rect(x_start, y_center, x_end, height, kf::Painter::Mode::Fill);
+    }
+};
+
+struct JoyControlWindow : Window {
+
+    JoyWidget joy_widget;
+    AxisWidget axis_widget;
+
+    static JoyControlWindow &instance() noexcept {
+        static JoyControlWindow instance;
+        return instance;
+    }
+
+    void render(kf::Painter &p) const noexcept override {
+        joy_widget.render(p);
+        axis_widget.render(p);
+    }
+
+private:
+
+    JoyControlWindow() = default;
+};
 
 void initEspNow() {
     {
@@ -61,6 +167,10 @@ void initEspNow() {
     static auto left_joystick = kf::Joystick(32, 33, 0.9);
     static auto right_axis = kf::AnalogAxis(34, 0.6);
 
+    struct JoyPacket {
+        float x, y, a;
+    } packet{};
+
     left_joystick.init();
     right_axis.init();
 
@@ -80,7 +190,12 @@ void initEspNow() {
         right_axis.updateCenter(s);
     }
 
-    current_state = State::Running;
+    auto &joy = JoyControlWindow::instance();
+    joy.axis_widget.value = &packet.a;
+    joy.joy_widget.x = &packet.x;
+    joy.joy_widget.y = &packet.y;
+
+    GUI::instance().bindWindow(joy);
 
     while (true) {
         const auto left_data = left_joystick.read();
@@ -99,44 +214,9 @@ void initEspNow() {
     }
 }
 
-static void drawJoyState(kf::Painter &p) {
-
-    const auto h = p.frame.height - 1;
-    const auto w = p.frame.width - 1;
-
-    const auto r = static_cast<kf::Position>(std::min(h, w) / 2);
-
-    const auto cx = static_cast<kf::Position>(w / 2);
-    const auto cy = static_cast<kf::Position>(h / 2);
-
-    p.circle(cx, cy, r, kf::Painter::Mode::FillBorder);
-
-    const auto x = static_cast<kf::Position>(0.5f * packet.x * p.frame.width + cx);
-    const auto y = static_cast<kf::Position>(-0.5f * packet.y * p.frame.height + cy);
-
-    p.line(cx, cy, x, y);
-}
-
-static void drawAxisState(kf::Painter &p) {
-    const auto w = 12;
-
-    const auto h = p.frame.height - 1;
-    const auto cy = static_cast<kf::Position>(h / 2);
-
-    const auto ww = static_cast<kf::Position>(p.frame.width - 1);
-
-    p.rect(
-        static_cast<kf::Position>(ww - w),
-        cy,
-        ww,
-        cy + packet.a * -0.5 * h,
-        kf::Painter::Mode::Fill
-    );
-}
-
 [[noreturn]] void displayTask(void *) {
-    constexpr auto fps = 20;
-    constexpr auto ms_per_frame = 1000 / fps;
+    constexpr auto target_fps = 20;
+    constexpr auto ms_per_frame = 1000 / target_fps;
 
     static auto display_driver = kf::SSD1306();
 
@@ -144,53 +224,25 @@ static void drawAxisState(kf::Painter &p) {
         display_driver.buffer,
         kf::SSD1306::width,
         kf::SSD1306::width,
-        kf::SSD1306::height,
-        0,
-        0
+        kf::SSD1306::height, 0, 0
     ).value);
 
-    static auto left_gfx = kf::Painter(
-        main_gfx.frame.sub(64, main_gfx.frame.height, 0, 0).value
-    );
-
-    static auto right_gfx = kf::Painter(
-        main_gfx.frame.sub(
-            64,
-            64,
-            left_gfx.frame.width,
-            0
-        ).value
-    );
-
     main_gfx.setFont(kf::fonts::gyver_5x7_en);
-    left_gfx.setFont(kf::fonts::gyver_5x7_en);
-    right_gfx.setFont(kf::fonts::gyver_5x7_en);
 
     display_driver.init();
 
+    auto &gui = GUI::instance();
+
     while (true) {
-        main_gfx.fill(false);
-
-        switch (current_state) {
-            case State::Setup:
-                main_gfx.text(0, 0, "Setup...");
-                break;
-
-            case State::Running:
-                drawJoyState(left_gfx);
-                drawAxisState(right_gfx);
-                break;
-        }
-
-        display_driver.update();
-
-        //
-
         delay(ms_per_frame);
+        gui.render(main_gfx);
+        display_driver.update();
     }
 }
 
 void setup() {
+    GUI::instance().bindWindow(InitWindow::instance());
+
     Serial.begin(115200);
 
     initEspNow();
