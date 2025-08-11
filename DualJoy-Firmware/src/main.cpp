@@ -109,8 +109,7 @@ struct AxisWidget final {
 
 struct JoyControlWindow : Window {
 
-    JoyWidget joy_widget;
-    AxisWidget axis_widget;
+    JoyWidget left_joy_widget, right_joy_widget;
 
     static JoyControlWindow &instance() noexcept {
         static JoyControlWindow instance;
@@ -118,8 +117,8 @@ struct JoyControlWindow : Window {
     }
 
     void render(kf::Painter &p) const noexcept override {
-        joy_widget.render(p);
-        axis_widget.render(p);
+        left_joy_widget.render(p);
+        right_joy_widget.render(p);
     }
 
 private:
@@ -164,45 +163,40 @@ void initEspNow() {
 }
 
 [[noreturn]] void inputTask(void *) {
-    static auto left_joystick = kf::Joystick(32, 33, 0.9);
-    static auto right_axis = kf::AnalogAxis(34, 0.6);
+    static auto left_joystick = kf::Joystick(32, 33, 0.8);
+    static auto right_joystick = kf::Joystick(35, 34, 0.8);
 
     struct JoyPacket {
-        float x, y, a;
+        float left_x, left_y;
+        float right_x, right_y;
     } packet{};
 
     left_joystick.init();
-    right_axis.init();
+    right_joystick.init();
 
     left_joystick.axis_x.inverted = true;
     left_joystick.axis_y.inverted = false;
-    right_axis.inverted = true;
+
+    right_joystick.axis_y.inverted = true;
+    right_joystick.axis_x.inverted = false;
 
     left_joystick.calibrate(100);
-    {
-        int s = 0;
-
-        for (int i = 0; i < 100; i++) {
-            s += right_axis.readRaw();
-            delay(1);
-        }
-        s /= 100;
-        right_axis.updateCenter(s);
-    }
+    right_joystick.calibrate(100);
 
     auto &joy = JoyControlWindow::instance();
-    joy.axis_widget.value = &packet.a;
-    joy.joy_widget.x = &packet.x;
-    joy.joy_widget.y = &packet.y;
+    joy.left_joy_widget.x = &packet.left_x;
+    joy.left_joy_widget.y = &packet.left_y;
+    joy.right_joy_widget.x = &packet.right_x;
+    joy.right_joy_widget.y = &packet.right_y;
 
     GUI::instance().bindWindow(joy);
 
     while (true) {
-        const auto left_data = left_joystick.read();
-        packet.a = right_axis.read();
+        packet.left_x = left_joystick.axis_x.read();
+        packet.left_y = left_joystick.axis_y.read();
 
-        packet.x = left_data.x;
-        packet.y = left_data.y;
+        packet.right_x = right_joystick.axis_x.read();
+        packet.right_y = right_joystick.axis_y.read();
 
         const auto result = espnow::Protocol::send(target, packet);
 
@@ -218,17 +212,20 @@ void initEspNow() {
     constexpr auto target_fps = 20;
     constexpr auto ms_per_frame = 1000 / target_fps;
 
-    static auto display_driver = kf::SSD1306();
+    kf::SSD1306 display_driver{};
 
-    static auto main_gfx = kf::Painter(kf::FrameView::create(
-        display_driver.buffer,
-        kf::SSD1306::width,
-        kf::SSD1306::width,
-        kf::SSD1306::height, 0, 0
-    ).value);
+    kf::Painter main_gfx{
+        kf::FrameView::create(
+            display_driver.buffer,
+            kf::SSD1306::width,
+            kf::SSD1306::width,
+            kf::SSD1306::height, 0, 0
+        ).value
+    };
 
     main_gfx.setFont(kf::fonts::gyver_5x7_en);
 
+    Wire.setClock(1000000UL);
     display_driver.init();
 
     auto &gui = GUI::instance();
