@@ -84,29 +84,6 @@ struct JoyWidget final {
     }
 };
 
-struct AxisWidget final {
-
-    static constexpr kf::Position width = 8;
-
-    const float *value{nullptr};
-
-    void render(kf::Painter &p) const noexcept {
-        const auto x_end = static_cast<kf::Position>(p.frame.width - 1);
-        const auto y_end = static_cast<kf::Position>(p.frame.height - 1);
-        const auto x_start = static_cast<kf::Position>(x_end - width);
-
-        if (value == nullptr) {
-            p.rect(x_start, 0, x_end, y_end, kf::Painter::Mode::FillBorder);
-            return;
-        }
-
-        const auto y_center = static_cast<kf::Position>(y_end / 2);
-        const auto height = static_cast<kf::Position>(static_cast<float>(y_center) - *value * static_cast<float>(y_center));
-
-        p.rect(x_start, y_center, x_end, height, kf::Painter::Mode::Fill);
-    }
-};
-
 struct JoyControlWindow : Window {
 
     JoyWidget left_joy_widget, right_joy_widget;
