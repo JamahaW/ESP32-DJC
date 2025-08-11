@@ -1,4 +1,5 @@
 #include <WiFi.h>
+#include <vector>
 #include "Arduino.h"
 
 #include "kf/GFX.hpp"
@@ -10,23 +11,66 @@
 
 static constexpr espnow::Mac target = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
 
-struct Window {
-    virtual void render(kf::Painter &p) const noexcept = 0;
+
+struct Widget {
+
+private:
+
+    kf::Painter *current_painter{nullptr};
+
+protected:
+
+    virtual void doRender(kf::Painter &painter) const noexcept = 0;
+
+public:
+
+    void render() const noexcept {
+        if (current_painter == nullptr) {
+            return;
+        }
+
+        doRender(*current_painter);
+    }
+
+    void bindPainter(kf::Painter &new_painter) noexcept {
+        current_painter = &new_painter;
+    }
 };
 
-struct GUI {
+struct Window {
+
+public:
+
+    const char *title{nullptr};
+
+private:
+
+    std::vector<const Widget *> widgets;
+
+public:
+
+    void add(const Widget &widget) noexcept {
+        widgets.push_back(&widget);
+    }
+
+    void render(kf::Painter &painter) const noexcept {
+        if (title != nullptr) {
+            painter.text(0, 0, title);
+        }
+
+        for (auto w: widgets) {
+            w->render();
+        }
+    }
+};
+
+struct GuiSystem {
 
 private:
 
     Window *current_window{nullptr};
 
 public:
-
-    static GUI &instance() noexcept {
-        static GUI instance;
-
-        return instance;
-    }
 
     void bindWindow(Window &window) noexcept {
         current_window = &window;
@@ -39,39 +83,14 @@ public:
 
         current_window->render(painter);
     }
-
-private:
-
-    GUI() = default;
-
-public:
-
-    GUI(const GUI &) = delete;
-
 };
 
-struct InitWindow : Window {
-
-    static InitWindow &instance() noexcept {
-        static InitWindow instance;
-        return instance;
-    }
-
-    void render(kf::Painter &p) const noexcept override {
-        p.text(0, 0, "Init");
-    }
-
-private:
-
-    InitWindow() = default;
-};
-
-struct JoyWidget final {
+struct JoyWidget final : Widget {
 
     const float *x{nullptr};
     const float *y{nullptr};
 
-    void render(kf::Painter &p) const noexcept {
+    void doRender(kf::Painter &p) const noexcept override {
         constexpr auto text_offset = static_cast<kf::Position>(2);
 
         const auto max_x = static_cast<kf::Position>(p.frame.width - 1);
@@ -86,37 +105,38 @@ struct JoyWidget final {
             const auto line_x = static_cast<kf::Position>(*x * static_cast<float>(center_x));
             p.line(center_x, center_y, static_cast<kf::Position>(center_x + line_x), center_y); // x
 
-            const auto text = rs::formatted<8>("%.2fX", *x);
-            p.text(text_offset, text_offset, text.data());
+            const auto text = rs::formatted<12>("%+1.2f   X", *x);
+            p.text(0, text_offset, text.data());
         }
 
         if (y != nullptr) {
             const auto line_y = static_cast<kf::Position>(*y * static_cast<float>(center_x));
             p.line(center_x, center_y, center_x, static_cast<kf::Position>(center_y - line_y)); // y
 
-            const auto text = rs::formatted<8>("%.2fY", *y);
-            p.text(text_offset, static_cast<kf::Position>(center_y + text_offset), text.data());
+            const auto text = rs::formatted<12>("%+1.2f   Y", *y);
+            p.text(0, static_cast<kf::Position>(center_y + text_offset), text.data());
         }
     }
 };
 
-struct JoyControlWindow : Window {
+struct DualJoyApp : GuiSystem {
+    Window joy_window;
+    Window init_window;
 
     JoyWidget left_joy_widget, right_joy_widget;
 
-    static JoyControlWindow &instance() noexcept {
-        static JoyControlWindow instance;
+    static DualJoyApp &instance() {
+        static DualJoyApp instance;
         return instance;
-    }
-
-    void render(kf::Painter &p) const noexcept override {
-        left_joy_widget.render(p);
-        right_joy_widget.render(p);
     }
 
 private:
 
-    JoyControlWindow() = default;
+    DualJoyApp() = default;
+
+public:
+
+    DualJoyApp(const DualJoyApp &) = delete;
 };
 
 void initEspNow() {
@@ -156,33 +176,37 @@ void initEspNow() {
 }
 
 [[noreturn]] void inputTask(void *) {
-    static auto left_joystick = kf::Joystick(32, 33, 0.8);
-    static auto right_joystick = kf::Joystick(35, 34, 0.8);
+    auto &app = DualJoyApp::instance();
+
+    kf::Joystick left_joystick{32, 33, 0.8};
+    kf::Joystick right_joystick{35, 34, 0.8};
 
     struct JoyPacket {
         float left_x, left_y;
         float right_x, right_y;
     } packet{};
 
+    app.init_window.title = "Joystick: Left";
     left_joystick.init();
-    right_joystick.init();
-
     left_joystick.axis_x.inverted = true;
     left_joystick.axis_y.inverted = false;
+    left_joystick.calibrate(100);
 
+    app.init_window.title = "Joystick: Right";
+    right_joystick.init();
     right_joystick.axis_y.inverted = true;
     right_joystick.axis_x.inverted = false;
-
-    left_joystick.calibrate(100);
     right_joystick.calibrate(100);
 
-    auto &joy = JoyControlWindow::instance();
-    joy.left_joy_widget.x = &packet.left_x;
-    joy.left_joy_widget.y = &packet.left_y;
-    joy.right_joy_widget.x = &packet.right_x;
-    joy.right_joy_widget.y = &packet.right_y;
+    app.left_joy_widget.x = &packet.left_x;
+    app.left_joy_widget.y = &packet.left_y;
+    app.joy_window.add(app.left_joy_widget);
 
-    GUI::instance().bindWindow(joy);
+    app.right_joy_widget.x = &packet.right_x;
+    app.right_joy_widget.y = &packet.right_y;
+    app.joy_window.add(app.right_joy_widget);
+
+    app.bindWindow(app.joy_window);
 
     while (true) {
         packet.left_x = left_joystick.axis_x.read();
@@ -202,10 +226,12 @@ void initEspNow() {
 }
 
 [[noreturn]] void displayTask(void *) {
-    constexpr auto target_fps = 30;
+    auto &app = DualJoyApp::instance();
+
+    constexpr auto target_fps = 25;
     constexpr auto ms_per_frame = 1000 / target_fps;
 
-    kf::SSD1306 display_driver{};
+    kf::SSD1306 display_driver;
 
     kf::Painter main_gfx{
         kf::FrameView::create(
@@ -215,23 +241,49 @@ void initEspNow() {
             kf::SSD1306::height, 0, 0
         ).value
     };
-
     main_gfx.setFont(kf::fonts::gyver_5x7_en);
+
+    constexpr auto column_width = 63;
+    constexpr auto joy_height = 32;
+
+    const auto column_right_offset = static_cast<kf::Position>(main_gfx.frame.width - column_width - 1);
+
+    kf::Painter left_joy{
+        main_gfx.frame.sub(
+            column_width,
+            joy_height,
+            0,
+            0
+        ).value
+    };
+    left_joy.setFont(kf::fonts::gyver_5x7_en);
+    app.left_joy_widget.bindPainter(left_joy);
+
+    kf::Painter right_joy{
+        main_gfx.frame.sub(
+            column_width,
+            joy_height,
+            column_right_offset,
+            0
+        ).value
+    };
+    right_joy.setFont(kf::fonts::gyver_5x7_en);
+    app.right_joy_widget.bindPainter(right_joy);
 
     display_driver.init();
     Wire.setClock(1000000UL);
 
-    auto &gui = GUI::instance();
-
     while (true) {
         delay(ms_per_frame);
-        gui.render(main_gfx);
+        app.render(main_gfx);
         display_driver.update();
     }
 }
 
 void setup() {
-    GUI::instance().bindWindow(InitWindow::instance());
+    auto &app = DualJoyApp::instance();
+    app.init_window.title = "Initializing";
+    app.bindWindow(app.init_window);
 
     Serial.begin(115200);
 
