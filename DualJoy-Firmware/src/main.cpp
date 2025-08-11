@@ -72,15 +72,31 @@ struct JoyWidget final {
     const float *y{nullptr};
 
     void render(kf::Painter &p) const noexcept {
-        const auto r = static_cast<kf::Position>(std::min(p.frame.width - 1, p.frame.height - 1) / 2);
-        p.circle(r, r, r, kf::Painter::Mode::FillBorder);
+        constexpr auto text_offset = static_cast<kf::Position>(2);
 
-        if (x == nullptr or y == nullptr) { return; }
+        const auto max_x = static_cast<kf::Position>(p.frame.width - 1);
+        const auto max_y = static_cast<kf::Position>(p.frame.height - 1);
 
-        const auto line_x = static_cast<kf::Position>(static_cast<float>(r) + *x * static_cast<float>(r));
-        const auto line_y = static_cast<kf::Position>(static_cast<float>(r) - *y * static_cast<float>(r));
+        p.rect(0, 0, max_x, max_y, kf::Painter::Mode::FillBorder);
 
-        p.line(r, r, line_x, line_y);
+        const auto center_x = static_cast<kf::Position>(max_x / 2);
+        const auto center_y = static_cast<kf::Position>(max_y / 2);
+
+        if (x != nullptr) {
+            const auto line_x = static_cast<kf::Position>(*x * static_cast<float>(center_x));
+            p.line(center_x, center_y, static_cast<kf::Position>(center_x + line_x), center_y); // x
+
+            const auto text = rs::formatted<8>("%.2fX", *x);
+            p.text(text_offset, text_offset, text.data());
+        }
+
+        if (y != nullptr) {
+            const auto line_y = static_cast<kf::Position>(*y * static_cast<float>(center_x));
+            p.line(center_x, center_y, center_x, static_cast<kf::Position>(center_y - line_y)); // y
+
+            const auto text = rs::formatted<8>("%.2fY", *y);
+            p.text(text_offset, static_cast<kf::Position>(center_y + text_offset), text.data());
+        }
     }
 };
 
@@ -186,7 +202,7 @@ void initEspNow() {
 }
 
 [[noreturn]] void displayTask(void *) {
-    constexpr auto target_fps = 20;
+    constexpr auto target_fps = 30;
     constexpr auto ms_per_frame = 1000 / target_fps;
 
     kf::SSD1306 display_driver{};
@@ -202,8 +218,8 @@ void initEspNow() {
 
     main_gfx.setFont(kf::fonts::gyver_5x7_en);
 
-    Wire.setClock(1000000UL);
     display_driver.init();
+    Wire.setClock(1000000UL);
 
     auto &gui = GUI::instance();
 
