@@ -1,129 +1,30 @@
 #include <WiFi.h>
-#include <vector>
 #include "Arduino.h"
 
-#include "kf/GFX.hpp"
+#include "KiraFlux-GUI.hpp"
+
 #include "kf/SSD1306.h"
 #include "kf/Joystick.hpp"
+#include "kf/Button.hpp"
 
 #include "espnow/Protocol.hpp"
+#include "gui/JoyWidget.hpp"
+#include "gui/FlagDisplay.hpp"
 
 
 static constexpr espnow::Mac target = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
 
 
-struct Widget {
+struct DualJoyApp : kfgui::WindowsManager {
+    kfgui::Window joy_window;
+    kfgui::Window init_window;
 
-private:
-
-    kf::Painter *current_painter{nullptr};
-
-protected:
-
-    virtual void doRender(kf::Painter &painter) const noexcept = 0;
-
-public:
-
-    void render() const noexcept {
-        if (current_painter == nullptr) {
-            return;
-        }
-
-        doRender(*current_painter);
-    }
-
-    void bindPainter(kf::Painter &new_painter) noexcept {
-        current_painter = &new_painter;
-    }
-};
-
-struct Window {
-
-public:
-
-    const char *title{nullptr};
-
-private:
-
-    std::vector<const Widget *> widgets;
-
-public:
-
-    void add(const Widget &widget) noexcept {
-        widgets.push_back(&widget);
-    }
-
-    void render(kf::Painter &painter) const noexcept {
-        if (title != nullptr) {
-            painter.text(0, 0, title);
-        }
-
-        for (auto w: widgets) {
-            w->render();
-        }
-    }
-};
-
-struct GuiSystem {
-
-private:
-
-    Window *current_window{nullptr};
-
-public:
-
-    void bindWindow(Window &window) noexcept {
-        current_window = &window;
-    }
-
-    void render(kf::Painter &painter) noexcept {
-        if (current_window == nullptr) { return; }
-
-        painter.fill(false);
-
-        current_window->render(painter);
-    }
-};
-
-struct JoyWidget final : Widget {
-
-    const float *x{nullptr};
-    const float *y{nullptr};
-
-    void doRender(kf::Painter &p) const noexcept override {
-        constexpr auto text_offset = static_cast<kf::Position>(2);
-
-        const auto max_x = static_cast<kf::Position>(p.frame.width - 1);
-        const auto max_y = static_cast<kf::Position>(p.frame.height - 1);
-
-        p.rect(0, 0, max_x, max_y, kf::Painter::Mode::FillBorder);
-
-        const auto center_x = static_cast<kf::Position>(max_x / 2);
-        const auto center_y = static_cast<kf::Position>(max_y / 2);
-
-        if (x != nullptr) {
-            const auto line_x = static_cast<kf::Position>(*x * static_cast<float>(center_x));
-            p.line(center_x, center_y, static_cast<kf::Position>(center_x + line_x), center_y); // x
-
-            const auto text = rs::formatted<12>("%+1.2f   X", *x);
-            p.text(0, text_offset, text.data());
-        }
-
-        if (y != nullptr) {
-            const auto line_y = static_cast<kf::Position>(*y * static_cast<float>(center_x));
-            p.line(center_x, center_y, center_x, static_cast<kf::Position>(center_y - line_y)); // y
-
-            const auto text = rs::formatted<12>("%+1.2f   Y", *y);
-            p.text(0, static_cast<kf::Position>(center_y + text_offset), text.data());
-        }
-    }
-};
-
-struct DualJoyApp : GuiSystem {
-    Window joy_window;
-    Window init_window;
-
-    JoyWidget left_joy_widget, right_joy_widget;
+    JoyWidget left_joy_widget;
+    JoyWidget right_joy_widget;
+    FlagDisplay left_hold;
+    FlagDisplay left_toggle;
+    FlagDisplay right_hold;
+    FlagDisplay right_toggle;
 
     static DualJoyApp &instance() {
         static DualJoyApp instance;
@@ -176,15 +77,33 @@ void initEspNow() {
 }
 
 [[noreturn]] void inputTask(void *) {
+    static struct {
+        float left_x, left_y;
+        float right_x, right_y;
+        bool toggle_left, toggle_right;
+        bool hold_left, hold_right;
+    } packet{};
+
     auto &app = DualJoyApp::instance();
+
+    kf::Button left_button{GPIO_NUM_15, kf::Button::Mode::PullUp};
+    kf::Button right_button{GPIO_NUM_4, kf::Button::Mode::PullUp};
 
     kf::Joystick left_joystick{32, 33, 0.8};
     kf::Joystick right_joystick{35, 34, 0.8};
 
-    struct JoyPacket {
-        float left_x, left_y;
-        float right_x, right_y;
-    } packet{};
+    app.init_window.title = "Buttons";
+    left_button.init(false);
+
+    left_button.handler = []() {
+        packet.toggle_left ^= 1;
+    };
+
+    right_button.init(false);
+
+    right_button.handler = []() {
+        packet.toggle_right ^= 1;
+    };
 
     app.init_window.title = "Joystick: Left";
     left_joystick.init();
@@ -200,11 +119,14 @@ void initEspNow() {
 
     app.left_joy_widget.x = &packet.left_x;
     app.left_joy_widget.y = &packet.left_y;
-    app.joy_window.add(app.left_joy_widget);
 
     app.right_joy_widget.x = &packet.right_x;
     app.right_joy_widget.y = &packet.right_y;
-    app.joy_window.add(app.right_joy_widget);
+
+    app.left_hold.flag = &packet.hold_left;
+    app.right_hold.flag = &packet.hold_right;
+    app.right_toggle.flag = &packet.toggle_right;
+    app.left_toggle.flag = &packet.toggle_left;
 
     app.bindWindow(app.joy_window);
 
@@ -214,6 +136,12 @@ void initEspNow() {
 
         packet.right_x = right_joystick.axis_x.read();
         packet.right_y = right_joystick.axis_y.read();
+
+        packet.hold_left = left_button.read();
+        packet.hold_right = right_button.read();
+
+        left_button.poll();
+        right_button.poll();
 
         const auto result = espnow::Protocol::send(target, packet);
 
@@ -243,8 +171,8 @@ void initEspNow() {
     };
     main_gfx.setFont(kf::fonts::gyver_5x7_en);
 
-    constexpr auto column_width = 63;
-    constexpr auto joy_height = 32;
+    constexpr auto column_width = 64;
+    constexpr auto joy_height = 44;
 
     const auto column_right_offset = static_cast<kf::Position>(main_gfx.frame.width - column_width - 1);
 
@@ -270,6 +198,54 @@ void initEspNow() {
     right_joy.setFont(kf::fonts::gyver_5x7_en);
     app.right_joy_widget.bindPainter(right_joy);
 
+    constexpr auto flag_display_height = 8;
+
+    kf::Painter left_hold{
+        main_gfx.frame.sub(
+            column_width,
+            flag_display_height,
+            0,
+            static_cast<kf::Position>(main_gfx.frame.height - flag_display_height)
+        ).value
+    };
+    left_hold.setFont(kf::fonts::gyver_5x7_en);
+    app.left_hold.bindPainter(left_hold);
+
+    kf::Painter right_hold{
+        main_gfx.frame.sub(
+            column_width,
+            flag_display_height,
+            column_right_offset,
+            static_cast<kf::Position>(main_gfx.frame.height - flag_display_height)
+        ).value
+    };
+    right_hold.setFont(kf::fonts::gyver_5x7_en);
+    app.right_hold.bindPainter(right_hold);
+
+
+    kf::Painter left_toggle{
+        main_gfx.frame.sub(
+            column_width,
+            flag_display_height,
+            0,
+            static_cast<kf::Position>(main_gfx.frame.height - flag_display_height * 2)
+        ).value
+    };
+    left_toggle.setFont(kf::fonts::gyver_5x7_en);
+    app.left_toggle.bindPainter(left_toggle);
+
+    kf::Painter right_toggle{
+        main_gfx.frame.sub(
+            column_width,
+            flag_display_height,
+            column_right_offset,
+            static_cast<kf::Position>(main_gfx.frame.height - flag_display_height * 2)
+        ).value
+    };
+    right_toggle.setFont(kf::fonts::gyver_5x7_en);
+    app.right_toggle.bindPainter(right_toggle);
+
+
     display_driver.init();
     Wire.setClock(1000000UL);
 
@@ -282,6 +258,19 @@ void initEspNow() {
 
 void setup() {
     auto &app = DualJoyApp::instance();
+
+    app.joy_window.add(app.left_joy_widget);
+    app.joy_window.add(app.right_joy_widget);
+    app.joy_window.add(app.left_hold);
+    app.joy_window.add(app.right_hold);
+    app.joy_window.add(app.left_toggle);
+    app.joy_window.add(app.right_toggle);
+
+    app.left_hold.label = "Hold L";
+    app.right_hold.label = "Hold R";
+    app.right_toggle.label = "Toggle R";
+    app.left_toggle.label = "Toggle L";
+
     app.init_window.title = "Initializing";
     app.bindWindow(app.init_window);
 
