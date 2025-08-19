@@ -17,35 +17,33 @@ public:
         y = &axis_y;
     }
 
-protected:
-
-    void doRender(kf::Painter &p) const noexcept override {
+    void render() noexcept override {
         constexpr auto text_offset = static_cast<kf::Position>(2);
         constexpr auto format = "%+1.2f";
 
-        p.rect(0, 0, p.maxX(), p.maxY(), kf::Painter::Mode::FillBorder);
+        painter.rect(0, 0, painter.maxX(), painter.maxY(), kf::Painter::Mode::FillBorder);
 
-        const auto center_x = p.centerX();
-        const auto center_y = p.centerY();
+        const auto center_x = painter.centerX();
+        const auto center_y = painter.centerY();
 
-        const auto right_text_x = p.maxGlyphX() - text_offset;
+        const auto right_text_x = painter.maxGlyphX() - text_offset;
 
         if (x != nullptr) {
-            p.line(
+            painter.line(
                 center_x,
                 center_y,
                 static_cast<kf::Position>(center_x + *x * static_cast<float>(center_x)),
                 center_y
             );
 
-            p.setCursor(text_offset, text_offset);
-            p.text(rs::formatted<8>(format, *x).data());
-            p.setCursor(right_text_x, text_offset);
-            p.text("X");
+            painter.setCursor(text_offset, text_offset);
+            painter.text(rs::formatted<8>(format, *x).data());
+            painter.setCursor(right_text_x, text_offset);
+            painter.text("X");
         }
 
         if (y != nullptr) {
-            p.line(
+            painter.line(
                 center_x,
                 center_y,
                 center_x,
@@ -54,10 +52,10 @@ protected:
 
             const auto text_offset_y = static_cast<kf::Position>(center_y + text_offset);
 
-            p.setCursor(text_offset, text_offset_y);
-            p.text(rs::formatted<8>(format, *y).data());
-            p.setCursor(right_text_x, text_offset_y);
-            p.text("Y");
+            painter.setCursor(text_offset, text_offset_y);
+            painter.text(rs::formatted<8>(format, *y).data());
+            painter.setCursor(right_text_x, text_offset_y);
+            painter.text("Y");
         }
     }
 };

@@ -1,175 +1,247 @@
 #include <WiFi.h>
 #include "Arduino.h"
-
 #include "KiraFlux-GUI.hpp"
-
 #include "kf/SSD1306.h"
 #include "kf/Joystick.hpp"
 #include "kf/Button.hpp"
-
+#include "kf/JoystickListener.hpp"
 #include "espnow/Protocol.hpp"
 #include "gui/JoyWidget.hpp"
 #include "gui/FlagDisplay.hpp"
 
 
-static constexpr espnow::Mac broadcast = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+struct EspNowClient {
+    espnow::Mac target;
 
+    [[nodiscard]] bool init() const {
+        if (not WiFiClass::mode(WIFI_MODE_STA)) {
+            return false;
+        }
 
-struct DualJoyApp final : kfgui::WindowsManager {
-    kfgui::Window joy_window;
-    kfgui::Window init_window;
+        if (const auto result = espnow::Protocol::init(); result.fail()) {
+            Serial.println(rs::toString(result.error));
+            return false;
+        }
 
+        if (const auto result = espnow::Peer::add(target); result.fail()) {
+            Serial.println(rs::toString(result.error));
+            return false;
+        }
+
+        return true;
+    }
+
+    template<typename T> inline rs::Result<void, espnow::Protocol::SendError> send(const T &value) {
+        return espnow::Protocol::send(target, value);
+    }
+};
+
+struct Periphery {
+    kf::Button left_button{GPIO_NUM_15, kf::Button::Mode::PullUp};
+    kf::Button right_button{GPIO_NUM_4, kf::Button::Mode::PullUp};
+    kf::Joystick left_joystick{GPIO_NUM_32, GPIO_NUM_33, 0.8f};
+    kf::Joystick right_joystick{GPIO_NUM_35, GPIO_NUM_34, 0.8f};
+    kf::JoystickListener left_joystick_listener{left_joystick};
+    EspNowClient esp_now{{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}};
+    kf::SSD1306 display_driver{};
+
+    static Periphery &instance() {
+        static Periphery instance;
+        return instance;
+    }
+};
+
+struct FlightBehavior : kfgui::Behavior {
     JoyWidget left_joy_widget;
     JoyWidget right_joy_widget;
     FlagDisplay toggle_mode;
 
-    static DualJoyApp &instance() noexcept {
-        static DualJoyApp instance;
+    struct {
+        float left_x{0}, left_y{0};
+        float right_x{0}, right_y{0};
+        bool toggle_mode{false};
+    } packet{};
+
+    void bindPainters(kf::Painter &root) noexcept override {
+        auto [up, down] = root.splitVertically<2>({7, 1});
+        auto [left_joy, right_joy] = up.splitHorizontally<2>({});
+
+        left_joy_widget.painter = left_joy;
+        right_joy_widget.painter = right_joy;
+        toggle_mode.painter = down;
+    }
+
+    void loop() noexcept override {
+        auto &periphery = Periphery::instance();
+
+        packet.left_x = periphery.left_joystick.axis_x.read();
+        packet.left_y = periphery.left_joystick.axis_y.read();
+        packet.right_x = periphery.right_joystick.axis_x.read();
+        packet.right_y = periphery.right_joystick.axis_y.read();
+
+        periphery.left_button.poll();
+        periphery.esp_now.send(packet);
+    }
+
+    void onBind() noexcept override {
+        auto &periphery = Periphery::instance();
+
+        periphery.left_button.handler = [this]() {
+            packet.toggle_mode = not packet.toggle_mode;
+        };
+
+        left_joy_widget.bindAxis(packet.left_x, packet.left_y);
+        right_joy_widget.bindAxis(packet.right_x, packet.right_y);
+        toggle_mode.flag = &packet.toggle_mode;
+        toggle_mode.label = "Toggle";
+    }
+
+    static FlightBehavior &instance() {
+        static FlightBehavior instance;
         return instance;
     }
 
 private:
-    DualJoyApp() = default;
-
-public:
-    DualJoyApp(const DualJoyApp &) = delete;
+    FlightBehavior() {
+        add(left_joy_widget);
+        add(right_joy_widget);
+        add(toggle_mode);
+    }
 };
 
-static void onEspNowReceive(const espnow::Mac &mac, const void *data, rs::u8 size) noexcept {
-    Serial.printf("[%s] : ", rs::toArrayString(mac).data());
-    Serial.print(static_cast<const char *>(data));
-}
-
-static void initEspNow() noexcept {
-    if (not WiFiClass::mode(WIFI_MODE_STA)) {
-        return;
-    }
-
-    if (const auto result = espnow::Protocol::init(); result.fail()) {
-        Serial.println(rs::toString(result.error));
-        return;
-    }
-
-    if (const auto result = espnow::Peer::add(broadcast); result.fail()) {
-        Serial.println(rs::toString(result.error));
-        return;
-    }
-
-    if (const auto result = espnow::Protocol::instance().setReceiveHandler(onEspNowReceive); result.fail()) {
-        Serial.println(rs::toString(result.error));
-        return;
-    }
-}
-
-[[noreturn]] static void inputTask(void *) noexcept {
-    constexpr auto rate_hz = 20;
-
-    static struct {
-        float left_x, left_y;
-        float right_x, right_y;
-        bool toggle_mode;
-    } packet{};
-
-    kf::Button left_button{GPIO_NUM_15, kf::Button::Mode::PullUp};
-    left_button.init(false);
-
-    left_button.handler = []() {
-        packet.toggle_mode ^= 1;
+struct RemoteMenuBehavior : kfgui::Behavior {
+    enum class Code : uint8_t {
+        None = 0x00,
+        Reload = 0x10,
+        Click = 0x20,
+        Left = 0x30,
+        Right = 0x31,
+        Up = 0x40,
+        Down = 0x41
     };
 
-    kf::Button right_button{GPIO_NUM_4, kf::Button::Mode::PullUp};
-    right_button.init(false);
+    std::array<char, 128> text_buffer{"Waiting for menu..."};
+    kfgui::TextDisplay text_display{text_buffer.data()};
 
-    right_button.handler = []() {
+    void bindPainters(kf::Painter &root) noexcept override {
+        text_display.painter = root;
+    }
 
-    };
+    void loop() noexcept override {
+        auto &periphery = Periphery::instance();
+        periphery.left_joystick_listener.poll();
+        periphery.left_button.poll();
+    }
 
-    kf::Joystick left_joystick{GPIO_NUM_32, GPIO_NUM_33, 0.8f};
-    left_joystick.init();
-    left_joystick.axis_x.inverted = true;
-    left_joystick.axis_y.inverted = false;
-    left_joystick.calibrate(1000);
+    void onBind() noexcept override {
+        auto &periphery = Periphery::instance();
 
-    kf::Joystick right_joystick{GPIO_NUM_35, GPIO_NUM_34, 0.8f};
-    right_joystick.init();
-    right_joystick.axis_y.inverted = true;
-    right_joystick.axis_x.inverted = false;
-    right_joystick.calibrate(1000);
+        periphery.left_joystick_listener.handler = [](kf::JoystickListener::Direction dir) {
+            if (const auto code = translate(dir); code != Code::None) {
+                send(code);
+            }
+        };
 
-    auto &app = DualJoyApp::instance();
-    app.left_joy_widget.bindAxis(packet.left_x, packet.left_y);
-    app.right_joy_widget.bindAxis(packet.right_x, packet.right_y);
-    app.toggle_mode.flag = &packet.toggle_mode;
-    app.bindWindow(app.joy_window);
+        periphery.left_button.handler = []() {
+            send(Code::Click);
+        };
 
-    while (true) {
-        packet.left_x = left_joystick.axis_x.read();
-        packet.left_y = left_joystick.axis_y.read();
-        packet.right_x = right_joystick.axis_x.read();
-        packet.right_y = right_joystick.axis_y.read();
+        espnow::Protocol::instance().setReceiveHandler([](const espnow::Mac &mac, const void *data, uint8_t size) {
+            auto &self = RemoteMenuBehavior::instance();
+            size_t copy_size = std::min(size, static_cast<uint8_t>(self.text_buffer.size() - 1));
+            memcpy(self.text_buffer.data(), data, copy_size);
+            self.text_buffer[copy_size] = '\0';
+        });
 
-        left_button.poll();
-        right_button.poll();
+        send(Code::Reload);
+    }
 
-        if (const auto result = espnow::Protocol::send(broadcast, packet); result.fail()) {
-            Serial.println(rs::toString(result.error));
+    static RemoteMenuBehavior &instance() {
+        static RemoteMenuBehavior instance;
+        return instance;
+    }
+
+private:
+
+    static void send(Code code) {
+        Periphery::instance().esp_now.send(code);
+    }
+
+    static Code translate(kf::JoystickListener::Direction dir) {
+        switch (dir) {
+            case kf::JoystickListener::Direction::Up:
+                return Code::Up;
+            case kf::JoystickListener::Direction::Down:
+                return Code::Down;
+            case kf::JoystickListener::Direction::Left:
+                return Code::Left;
+            case kf::JoystickListener::Direction::Right:
+                return Code::Right;
+            default:
+                return Code::None;
         }
-
-        constexpr auto period_ms = 1000 / rate_hz;
-        delay(period_ms);
     }
-}
 
-[[noreturn]] static void displayTask(void *) noexcept {
-    constexpr auto target_fps = 25;
+    RemoteMenuBehavior() {
+        add(text_display);
+    }
+};
 
-    kf::SSD1306 display_driver{};
+[[noreturn]] void setup() {
+    static auto &periphery = Periphery::instance();
+    static auto &manager = kfgui::BehaviorManager::instance();
+    static auto &flight_behavior = FlightBehavior::instance();
+    static auto &remote_menu_behavior = RemoteMenuBehavior::instance();
 
-    kf::Painter main_painter{
+    Serial.begin(115200);
+
+    periphery.display_driver.init();
+    Wire.setClock(1000000);
+    periphery.display_driver.update();
+
+    periphery.left_joystick.init();
+    periphery.right_joystick.init();
+    periphery.left_joystick.axis_x.inverted = true;
+    periphery.right_joystick.axis_y.inverted = true;
+    periphery.left_joystick.calibrate(500);
+    periphery.right_joystick.calibrate(500);
+    periphery.left_button.init(false);
+    periphery.right_button.init(false);
+
+    if (not periphery.esp_now.init()) {
+        Serial.println("espnow fail");
+    }
+
+    periphery.right_button.handler = []() {
+        if (manager.isActive(flight_behavior)) {
+            manager.bindBehavior(remote_menu_behavior);
+        } else {
+            manager.bindBehavior(flight_behavior);
+        }
+    };
+
+    static kf::Painter painter{
         kf::FrameView{
-            display_driver.buffer, kf::SSD1306::width,
-            kf::SSD1306::width, kf::SSD1306::height, 0, 0
+            periphery.display_driver.buffer,
+            kf::SSD1306::width, kf::SSD1306::width, kf::SSD1306::height, 0, 0
         },
         kf::fonts::gyver_5x7_en
     };
 
-    auto [up, down] = main_painter.splitVertically<2>({7, 1});
-    auto [left_joy, right_joy] = up.splitHorizontally<2>({});
+    flight_behavior.bindPainters(painter);
+    remote_menu_behavior.bindPainters(painter);
 
-    auto &app = DualJoyApp::instance();
-    app.left_joy_widget.bindPainter(left_joy);
-    app.right_joy_widget.bindPainter(right_joy);
-    app.toggle_mode.bindPainter(down);
-
-    display_driver.init();
-    Wire.setClock(1000000UL);
+    manager.bindBehavior(flight_behavior);
 
     while (true) {
-        app.render(main_painter);
-        display_driver.update();
+        manager.loop();
+        periphery.right_button.poll();
 
-        constexpr auto frame_period_ms = 1000 / target_fps;
-        delay(frame_period_ms);
+        manager.render(painter);
+        periphery.display_driver.update();
+
+        delay(20);
     }
-}
-
-void setup() {
-    auto &app = DualJoyApp::instance();
-    app.joy_window.add(app.left_joy_widget);
-    app.joy_window.add(app.right_joy_widget);
-    app.joy_window.add(app.toggle_mode);
-
-    app.toggle_mode.label = "Toggle";
-
-    app.init_window.title = "Initializing";
-    app.bindWindow(app.init_window);
-
-    Serial.begin(115200);
-
-    initEspNow();
-
-    xTaskCreate(displayTask, "display", 4096, nullptr, 1, nullptr);
-    xTaskCreate(inputTask, "input", 4096, nullptr, 1, nullptr);
 }
 
 void loop() {}
