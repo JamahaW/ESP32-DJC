@@ -5,34 +5,59 @@
 
 struct JoyWidget final : kfgui::Widget {
 
+private:
+
     const float *x{nullptr};
     const float *y{nullptr};
 
+public:
+
+    void bindAxis(const float &axis_x, const float &axis_y) noexcept {
+        x = &axis_x;
+        y = &axis_y;
+    }
+
+protected:
+
     void doRender(kf::Painter &p) const noexcept override {
         constexpr auto text_offset = static_cast<kf::Position>(2);
+        constexpr auto format = "%+1.2f";
 
-        const auto max_x = static_cast<kf::Position>(p.frame.width - 1);
-        const auto max_y = static_cast<kf::Position>(p.frame.height - 1);
+        p.rect(0, 0, p.maxX(), p.maxY(), kf::Painter::Mode::FillBorder);
 
-        p.rect(0, 0, max_x, max_y, kf::Painter::Mode::FillBorder);
+        const auto center_x = p.centerX();
+        const auto center_y = p.centerY();
 
-        const auto center_x = static_cast<kf::Position>(max_x / 2);
-        const auto center_y = static_cast<kf::Position>(max_y / 2);
+        const auto right_text_x = p.maxGlyphX() - text_offset;
 
         if (x != nullptr) {
-            const auto line_x = static_cast<kf::Position>(*x * static_cast<float>(center_x));
-            p.line(center_x, center_y, static_cast<kf::Position>(center_x + line_x), center_y); // x
+            p.line(
+                center_x,
+                center_y,
+                static_cast<kf::Position>(center_x + *x * static_cast<float>(center_x)),
+                center_y
+            );
 
-            const auto text = rs::formatted<12>("%+1.2f   X", *x);
-            p.text(0, text_offset, text.data());
+            p.setCursor(text_offset, text_offset);
+            p.text(rs::formatted<8>(format, *x).data());
+            p.setCursor(right_text_x, text_offset);
+            p.text("X");
         }
 
         if (y != nullptr) {
-            const auto line_y = static_cast<kf::Position>(*y * static_cast<float>(center_x));
-            p.line(center_x, center_y, center_x, static_cast<kf::Position>(center_y - line_y)); // y
+            p.line(
+                center_x,
+                center_y,
+                center_x,
+                static_cast<kf::Position>(center_y - *y * static_cast<float>(center_y))
+            );
 
-            const auto text = rs::formatted<12>("%+1.2f   Y", *y);
-            p.text(0, static_cast<kf::Position>(center_y + text_offset), text.data());
+            const auto text_offset_y = static_cast<kf::Position>(center_y + text_offset);
+
+            p.setCursor(text_offset, text_offset_y);
+            p.text(rs::formatted<8>(format, *y).data());
+            p.setCursor(right_text_x, text_offset_y);
+            p.text("Y");
         }
     }
 };

@@ -24,7 +24,8 @@ public:
 
     void render(kf::Painter &painter) const noexcept {
         if (title != nullptr) {
-            painter.text(0, 0, title);
+            painter.setCursor(0, 0);
+            painter.text(title);
         }
 
         for (auto w: widgets) {
